@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tink IA</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1f2330;
+    --accent: #6c8cff;
+    --text: #eef0f6;
+    --text-dim: #9aa0b4;
+    --bubble-user: #6c8cff;
+    --bubble-ai: #1f2330;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ---- Login / Registrazione ---- */
+  #auth-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    padding: 20px;
+  }
+  .auth-box {
+    background: var(--panel);
+    padding: 32px;
+    border-radius: 16px;
+    width: 100%;
+    max-width: 360px;
+  }
+  .auth-box h1 {
+    margin: 0 0 4px;
+    font-size: 24px;
+  }
+  .auth-box p.subtitle {
+    color: var(--text-dim);
+    margin: 0 0 24px;
+    font-size: 14px;
+  }
+  .auth-box input {
+    width: 100%;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    border-radius: 10px;
+    border: 1px solid #2b3040;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 15px;
+  }
+  .auth-box button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: white;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  .auth-switch {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+  .auth-switch a {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  #auth-error {
+    color: #ff6b6b;
+    font-size: 13px;
+    margin-bottom: 10px;
+    min-height: 16px;
+  }
+
+  /* ---- App ---- */
+  #app {
+    display: none;
+    height: 100vh;
+    grid-template-columns: 260px 1fr;
+    display: grid;
+  }
+  #sidebar {
+    background: var(--panel);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #23273400;
+    overflow-y: auto;
+  }
+  #sidebar h2 {
+    font-size: 16px;
+    margin: 0 0 12px;
+  }
+  #new-conv-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 16px;
+  }
+  .conv-item {
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-item:hover, .conv-item.active {
+    background: var(--panel-2);
+    color: var(--text);
+  }
+  #user-bar {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 12px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  #logout-btn {
+    background: none;
+    border: 1px solid #2b3040;
+    color: var(--text-dim);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  #main {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 70%;
+    padding: 12px 16px;
+    border-radius: 16px;
+    line-height: 1.4;
+    font-size: 15px;
+    white-space: pre-wrap;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--bubble-user);
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--bubble-ai);
+    border-bottom-left-radius: 4px;
+  }
+  .msg img {
+    max-width: 100%;
+    border-radius: 10px;
+    display: block;
+  }
+
+  #input-bar {
+    padding: 16px 24px 24px;
+    display: flex;
+    gap: 10px;
+  }
+  #input-bar input {
+    flex: 1;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid #2b3040;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 15px;
+  }
+  #input-bar button {
+    border: none;
+    border-radius: 12px;
+    padding: 0 18px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #send-btn { background: var(--accent); color: white; }
+  #image-btn { background: var(--panel-2); color: var(--text); border: 1px solid #2b3040; }
+
+  .typing { color: var(--text-dim); font-size: 13px; padding-left: 24px; }
+</style>
+</head>
+<body>
+
+<!-- ============== SCHERMATA LOGIN / REGISTRAZIONE ============== -->
+<div id="auth-screen" style="display: {{ 'none' if logged_in else 'flex' }};">
+  <div class="auth-box">
+    <h1 id="auth-title">Accedi a Tink</h1>
+    <p class="subtitle" id="auth-subtitle">Devi registrarti per poter chattare con l'IA.</p>
+    <div id="auth-error"></div>
+    <input type="text" id="username" placeholder="Username" autocomplete="username">
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+    <button id="auth-submit" onclick="doLogin()">Accedi</button>
+    <div class="auth-switch">
+      <span id="switch-text">Non hai un account? </span>
+      <a onclick="toggleAuthMode()" id="switch-link">Registrati</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============== APP CHAT ============== -->
+<div id="app" style="display: {{ 'grid' if logged_in else 'none' }};">
+  <div id="sidebar">
+    <h2>Tink</h2>
+    <button id="new-conv-btn" onclick="newConversation()">+ Nuova conversazione</button>
+    <div id="conv-list"></div>
+    <div id="user-bar">
+      <span id="username-label">{{ username if logged_in }}</span>
+      <button id="logout-btn" onclick="doLogout()">Esci</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="messages"></div>
+    <div class="typing" id="typing-indicator" style="display:none;">Tink sta scrivendo...</div>
+    <div id="input-bar">
+      <input type="text" id="message-input" placeholder="Scrivi un messaggio..." onkeydown="if(event.key==='Enter') sendMessage()">
+      <button id="image-btn" onclick="sendImagePrompt()">🖼️ Immagine</button>
+      <button id="send-btn" onclick="sendMessage()">Invia</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let isRegisterMode = false;
+let currentConversationId = null;
+
+// ---------- Auth ----------
+function toggleAuthMode() {
+  isRegisterMode = !isRegisterMode;
+  document.getElementById('auth-title').innerText = isRegisterMode ? 'Crea un account' : 'Accedi a Tink';
+  document.getElementById('auth-subtitle').innerText = isRegisterMode
+    ? 'Crea un account per iniziare a chattare con l\'IA.'
+    : 'Devi registrarti per poter chattare con l\'IA.';
+  document.getElementById('auth-submit').innerText = isRegisterMode ? 'Registrati' : 'Accedi';
+  document.getElementById('switch-text').innerText = isRegisterMode ? 'Hai già un account? ' : 'Non hai un account? ';
+  document.getElementById('switch-link').innerText = isRegisterMode ? 'Accedi' : 'Registrati';
+  document.getElementById('auth-error').innerText = '';
+}
+
+async function doLogin() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const endpoint = isRegisterMode ? '/api/register' : '/api/login';
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username, password})
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    document.getElementById('auth-error').innerText = data.error || 'Errore';
+    return;
+  }
+  location.reload();
+}
+
+async function doLogout() {
+  await fetch('/api/logout', {method: 'POST'});
+  location.reload();
+}
+
+// ---------- Conversazioni ----------
+async function loadConversations() {
+  const res = await fetch('/api/conversations');
+  if (!res.ok) return;
+  const convs = await res.json();
+  const list = document.getElementById('conv-list');
+  list.innerHTML = '';
+  convs.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'conv-item' + (c.id === currentConversationId ? ' active' : '');
+    div.innerText = c.title || 'Nuova conversazione';
+    div.onclick = () => loadConversation(c.id);
+    list.appendChild(div);
+  });
+}
+
+async function newConversation() {
+  const res = await fetch('/api/conversations/new', {method: 'POST'});
+  const data = await res.json();
+  currentConversationId = data.conversation_id;
+  document.getElementById('messages').innerHTML = '';
+  loadConversations();
+}
+
+async function loadConversation(id) {
+  const res = await fetch(`/api/conversations/${id}/messages`);
+  if (!res.ok) return;
+  const messages = await res.json();
+  currentConversationId = id;
+  const box = document.getElementById('messages');
+  box.innerHTML = '';
+  messages.forEach(m => renderMessage(m.role, m.content, m.image_base64));
+  loadConversations();
+}
+
+// ---------- Messaggi ----------
+function renderMessage(role, content, imageBase64) {
+  const box = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  if (imageBase64) {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + imageBase64;
+    div.appendChild(img);
+  } else {
+    div.innerText = content;
+  }
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('message-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  renderMessage('user', text, null);
+  document.getElementById('typing-indicator').style.display = 'block';
+
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text})
+  });
+  const data = await res.json();
+  document.getElementById('typing-indicator').style.display = 'none';
+  if (res.ok) {
+    currentConversationId = data.conversation_id;
+    renderMessage('assistant', data.reply, null);
+    loadConversations();
+  } else {
+    renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
+  }
+}
+
+async function sendImagePrompt() {
+  const prompt = prompt_fallback();
+  if (!prompt) return;
+  renderMessage('user', '[Immagine] ' + prompt, null);
+  document.getElementById('typing-indicator').style.display = 'block';
+
+  const res = await fetch('/api/generate-image', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt})
+  });
+  const data = await res.json();
+  document.getElementById('typing-indicator').style.display = 'none';
+  if (res.ok) {
+    currentConversationId = data.conversation_id;
+    renderMessage('assistant', null, data.image_base64);
+    loadConversations();
+  } else {
+    renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
+  }
+}
+
+function prompt_fallback() {
+  return window.prompt('Descrivi l\'immagine da generare:');
+}
+
+// ---------- Init ----------
+{% if logged_in %}
+loadConversations();
+{% endif %}
+</script>
+
+</body>
+</html>
