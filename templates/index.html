@@ -1,319 +1,473 @@
-import os
-import sqlite3
-import base64
-from datetime import datetime
-
-from flask import Flask, request, jsonify, session, render_template, redirect
-from werkzeug.security import generate_password_hash, check_password_hash
-from google import genai
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "cambia-questa-chiave-in-produzione")
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "tink.db")
-
-# Il client legge automaticamente la variabile d'ambiente GEMINI_API_KEY
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
-TEXT_MODEL = "gemini-3.6-flash"
-IMAGE_MODEL = "gemini-3.1-flash-image"
-
-
-# ---------------------------------------------------------------------------
-# Database
-# ---------------------------------------------------------------------------
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_db()
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            image_base64 TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (conversation_id) REFERENCES conversations (id)
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-init_db()
-
-
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-
-def login_required(f):
-    def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            return jsonify({"error": "Devi effettuare il login"}), 401
-        return f(*args, **kwargs)
-    wrapper.__name__ = f.__name__
-    return wrapper
-
-
-# ---------------------------------------------------------------------------
-# Pagine
-# ---------------------------------------------------------------------------
-
-@app.route("/")
-def home():
-    if "user_id" not in session:
-        return render_template("index.html", logged_in=False)
-    return render_template("index.html", logged_in=True, username=session.get("username"))
-
-
-# ---------------------------------------------------------------------------
-# Autenticazione
-# ---------------------------------------------------------------------------
-
-@app.route("/api/register", methods=["POST"])
-def register():
-    data = request.get_json(force=True)
-    username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
-
-    if len(username) < 3 or len(password) < 4:
-        return jsonify({"error": "Username minimo 3 caratteri, password minimo 4"}), 400
-
-    conn = get_db()
-    existing = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-    if existing:
-        conn.close()
-        return jsonify({"error": "Username già registrato"}), 400
-
-    password_hash = generate_password_hash(password)
-    cur = conn.execute(
-        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-        (username, password_hash, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    user_id = cur.lastrowid
-    conn.close()
-
-    session["user_id"] = user_id
-    session["username"] = username
-    return jsonify({"ok": True, "username": username})
-
-
-@app.route("/api/login", methods=["POST"])
-def login():
-    data = request.get_json(force=True)
-    username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
-
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    conn.close()
-
-    if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Username o password errati"}), 401
-
-    session["user_id"] = user["id"]
-    session["username"] = user["username"]
-    return jsonify({"ok": True, "username": user["username"]})
-
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-    session.clear()
-    return jsonify({"ok": True})
-
-
-# ---------------------------------------------------------------------------
-# Conversazioni
-# ---------------------------------------------------------------------------
-
-@app.route("/api/conversations", methods=["GET"])
-@login_required
-def list_conversations():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT id, title, created_at FROM conversations WHERE user_id = ? ORDER BY id DESC",
-        (session["user_id"],),
-    ).fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/conversations/new", methods=["POST"])
-@login_required
-def new_conversation():
-    # Creare una nuova riga "salva" automaticamente quella precedente,
-    # che resta intatta e consultabile nella cronologia.
-    conn = get_db()
-    cur = conn.execute(
-        "INSERT INTO conversations (user_id, title, created_at) VALUES (?, ?, ?)",
-        (session["user_id"], None, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conv_id = cur.lastrowid
-    conn.close()
-    session["conversation_id"] = conv_id
-    return jsonify({"conversation_id": conv_id})
-
-
-@app.route("/api/conversations/<int:conv_id>/messages", methods=["GET"])
-@login_required
-def get_messages(conv_id):
-    conn = get_db()
-    conv = conn.execute(
-        "SELECT * FROM conversations WHERE id = ? AND user_id = ?", (conv_id, session["user_id"])
-    ).fetchone()
-    if not conv:
-        conn.close()
-        return jsonify({"error": "Conversazione non trovata"}), 404
-
-    rows = conn.execute(
-        "SELECT role, content, image_base64, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC",
-        (conv_id,),
-    ).fetchall()
-    conn.close()
-    session["conversation_id"] = conv_id
-    return jsonify([dict(r) for r in rows])
-
-
-def _ensure_conversation():
-    """Ritorna l'id della conversazione corrente, creandone una se non esiste."""
-    conv_id = session.get("conversation_id")
-    if conv_id:
-        return conv_id
-    conn = get_db()
-    cur = conn.execute(
-        "INSERT INTO conversations (user_id, title, created_at) VALUES (?, ?, ?)",
-        (session["user_id"], None, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conv_id = cur.lastrowid
-    conn.close()
-    session["conversation_id"] = conv_id
-    return conv_id
-
-
-def _save_message(conv_id, role, content=None, image_base64=None):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO messages (conversation_id, role, content, image_base64, created_at) VALUES (?, ?, ?, ?, ?)",
-        (conv_id, role, content, image_base64, datetime.utcnow().isoformat()),
-    )
-    # Se è il primo messaggio utente, usalo come titolo della conversazione
-    row = conn.execute(
-        "SELECT title FROM conversations WHERE id = ?", (conv_id,)
-    ).fetchone()
-    if role == "user" and content and not row["title"]:
-        title = content[:40] + ("..." if len(content) > 40 else "")
-        conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conv_id))
-    conn.commit()
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Chat testuale
-# ---------------------------------------------------------------------------
-
-@app.route("/api/chat", methods=["POST"])
-@login_required
-def chat():
-    data = request.get_json(force=True)
-    user_message = (data.get("message") or "").strip()
-    if not user_message:
-        return jsonify({"error": "Messaggio vuoto"}), 400
-
-    conv_id = _ensure_conversation()
-
-    # Recupera la cronologia per dare contesto al modello
-    conn = get_db()
-    history = conn.execute(
-        "SELECT role, content FROM messages WHERE conversation_id = ? AND content IS NOT NULL ORDER BY id ASC",
-        (conv_id,),
-    ).fetchall()
-    conn.close()
-
-    contents = []
-    for m in history:
-        role = "user" if m["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": m["content"]}]})
-    contents.append({"role": "user", "parts": [{"text": user_message}]})
-
-    _save_message(conv_id, "user", content=user_message)
-
-    try:
-        response = client.models.generate_content(model=TEXT_MODEL, contents=contents)
-        reply_text = response.text or "(nessuna risposta)"
-    except Exception as e:
-        reply_text = f"Errore nel contattare l'IA: {e}"
-
-    _save_message(conv_id, "assistant", content=reply_text)
-
-    return jsonify({"reply": reply_text, "conversation_id": conv_id})
-
-
-# ---------------------------------------------------------------------------
-# Generazione immagini
-# ---------------------------------------------------------------------------
-
-@app.route("/api/generate-image", methods=["POST"])
-@login_required
-def generate_image():
-    data = request.get_json(force=True)
-    prompt = (data.get("prompt") or "").strip()
-    if not prompt:
-        return jsonify({"error": "Prompt vuoto"}), 400
-
-    conv_id = _ensure_conversation()
-    _save_message(conv_id, "user", content=f"[Immagine] {prompt}")
-
-    try:
-        response = client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
-        image_b64 = None
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "inline_data", None) is not None:
-                image_bytes = part.inline_data.data
-                if isinstance(image_bytes, str):
-                    image_b64 = image_bytes
-                else:
-                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                break
-        if not image_b64:
-            return jsonify({"error": "Il modello non ha restituito un'immagine"}), 500
-    except Exception as e:
-        return jsonify({"error": f"Errore nella generazione: {e}"}), 500
-
-    _save_message(conv_id, "assistant", image_base64=image_b64)
-
-    return jsonify({"image_base64": image_b64, "conversation_id": conv_id})
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=True)
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tink IA</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f5f6fa;
+    --panel-2: #ffffff;
+    --border: #e2e4ec;
+    --accent: #2f5cff;
+    --accent-text: #ffffff;
+    --text: #1a1c23;
+    --text-dim: #6b7080;
+    --bubble-user: #2f5cff;
+    --bubble-user-text: #ffffff;
+    --bubble-ai: #f0f1f6;
+    --bubble-ai-text: #1a1c23;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ---- Login / Registrazione ---- */
+  #auth-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    padding: 20px;
+    background: var(--panel);
+  }
+  .auth-box {
+    background: var(--panel-2);
+    padding: 32px;
+    border-radius: 16px;
+    width: 100%;
+    max-width: 360px;
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 24px rgba(20, 20, 40, 0.06);
+  }
+  .auth-box h1 {
+    margin: 0 0 4px;
+    font-size: 24px;
+    color: var(--text);
+  }
+  .auth-box p.subtitle {
+    color: var(--text-dim);
+    margin: 0 0 24px;
+    font-size: 14px;
+  }
+  .auth-box input {
+    width: 100%;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #ffffff;
+    color: var(--text);
+    font-size: 15px;
+  }
+  .auth-box input::placeholder {
+    color: #a6aab8;
+  }
+  .auth-box button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  .auth-switch {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+  .auth-switch a {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  #auth-error {
+    color: #d64545;
+    font-size: 13px;
+    margin-bottom: 10px;
+    min-height: 16px;
+  }
+  .hidden { display: none !important; }
+
+  /* ---- App ---- */
+  #app {
+    height: 100vh;
+    grid-template-columns: 260px 1fr;
+    display: grid;
+  }
+  #sidebar {
+    background: var(--panel);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  #sidebar h2 {
+    font-size: 16px;
+    margin: 0 0 12px;
+    color: var(--text);
+  }
+  #new-conv-btn {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 10px;
+    padding: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 16px;
+  }
+  .conv-item {
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-item:hover, .conv-item.active {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #user-bar {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  #logout-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  #main {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg);
+  }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 70%;
+    padding: 12px 16px;
+    border-radius: 16px;
+    line-height: 1.4;
+    font-size: 15px;
+    white-space: pre-wrap;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--bubble-user);
+    color: var(--bubble-user-text);
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--bubble-ai);
+    color: var(--bubble-ai-text);
+    border-bottom-left-radius: 4px;
+  }
+  .msg img {
+    max-width: 100%;
+    border-radius: 10px;
+    display: block;
+  }
+
+  #input-bar {
+    padding: 16px 24px 24px;
+    display: flex;
+    gap: 10px;
+    border-top: 1px solid var(--border);
+  }
+  #input-bar input {
+    flex: 1;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 15px;
+  }
+  #input-bar button {
+    border: none;
+    border-radius: 12px;
+    padding: 0 18px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #send-btn { background: var(--accent); color: var(--accent-text); }
+  #image-btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+
+  .typing { color: var(--text-dim); font-size: 13px; padding-left: 24px; }
+</style>
+</head>
+<body>
+
+<!-- ============== SCHERMATA LOGIN / REGISTRAZIONE ============== -->
+<div id="auth-screen" class="{{ '' if not logged_in else 'hidden' }}">
+  <div class="auth-box">
+    <h1 id="auth-title">Accedi a Tink</h1>
+    <p class="subtitle" id="auth-subtitle">Devi registrarti per poter chattare con l'IA.</p>
+    <div id="auth-error"></div>
+
+    <input type="text" id="reg-username" placeholder="Nome utente" autocomplete="username" class="hidden">
+    <input type="email" id="email" placeholder="Email" autocomplete="email">
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+
+    <button id="auth-submit" onclick="doLogin()">Accedi</button>
+    <div class="auth-switch">
+      <span id="switch-text">Non hai un account? </span>
+      <a onclick="toggleAuthMode()" id="switch-link">Registrati</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============== APP CHAT ============== -->
+<div id="app" class="{{ 'hidden' if not logged_in else '' }}">
+  <div id="sidebar">
+    <h2>Tink</h2>
+    <button id="new-conv-btn" onclick="newConversation()">+ Nuova conversazione</button>
+    <div id="conv-list"></div>
+    <div id="user-bar">
+      <span id="username-label">{{ username if logged_in }}</span>
+      <button id="logout-btn" onclick="doLogout()">Esci</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="messages"></div>
+    <div class="typing hidden" id="typing-indicator">Tink sta scrivendo...</div>
+    <div id="input-bar">
+      <input type="text" id="message-input" placeholder="Scrivi un messaggio..." onkeydown="if(event.key==='Enter') sendMessage()">
+      <button id="image-btn" onclick="sendImagePrompt()">🖼️ Immagine</button>
+      <button id="send-btn" onclick="sendMessage()">Invia</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let isRegisterMode = false;
+let currentConversationId = null;
+
+// ---------- Auth ----------
+function toggleAuthMode() {
+  isRegisterMode = !isRegisterMode;
+  document.getElementById('auth-title').innerText = isRegisterMode ? 'Crea un account' : 'Accedi a Tink';
+  document.getElementById('auth-subtitle').innerText = isRegisterMode
+    ? "Crea un account per iniziare a chattare con l'IA."
+    : "Devi registrarti per poter chattare con l'IA.";
+  document.getElementById('auth-submit').innerText = isRegisterMode ? 'Registrati' : 'Accedi';
+  document.getElementById('switch-text').innerText = isRegisterMode ? 'Hai già un account? ' : 'Non hai un account? ';
+  document.getElementById('switch-link').innerText = isRegisterMode ? 'Accedi' : 'Registrati';
+  document.getElementById('auth-error').innerText = '';
+  document.getElementById('reg-username').classList.toggle('hidden', !isRegisterMode);
+}
+
+async function doLogin() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const errorBox = document.getElementById('auth-error');
+  errorBox.innerText = '';
+
+  let endpoint = '/api/login';
+  let body = { email, password };
+
+  if (isRegisterMode) {
+    const username = document.getElementById('reg-username').value.trim();
+    endpoint = '/api/register';
+    body = { username, email, password };
+  }
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      errorBox.innerText = data.error || 'Errore, riprova.';
+      return;
+    }
+    location.reload();
+  } catch (err) {
+    errorBox.innerText = 'Impossibile contattare il server. Riprova tra poco.';
+  }
+}
+
+async function doLogout() {
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+  } catch (err) {
+    // Se la richiesta fallisce, ricarichiamo comunque la pagina
+  }
+  location.reload();
+}
+
+// ---------- Conversazioni ----------
+async function loadConversations() {
+  try {
+    const res = await fetch('/api/conversations');
+    if (!res.ok) return;
+    const convs = await res.json();
+    const list = document.getElementById('conv-list');
+    list.innerHTML = '';
+    convs.forEach(c => {
+      const div = document.createElement('div');
+      div.className = 'conv-item' + (c.id === currentConversationId ? ' active' : '');
+      div.innerText = c.title || 'Nuova conversazione';
+      div.onclick = () => loadConversation(c.id);
+      list.appendChild(div);
+    });
+  } catch (err) {
+    console.error('Errore nel caricare le conversazioni', err);
+  }
+}
+
+async function newConversation() {
+  try {
+    const res = await fetch('/api/conversations/new', { method: 'POST' });
+    if (!res.ok) return;
+    const data = await res.json();
+    currentConversationId = data.conversation_id;
+    document.getElementById('messages').innerHTML = '';
+    loadConversations();
+  } catch (err) {
+    console.error('Errore nel creare una nuova conversazione', err);
+  }
+}
+
+async function loadConversation(id) {
+  try {
+    const res = await fetch(`/api/conversations/${id}/messages`);
+    if (!res.ok) return;
+    const messages = await res.json();
+    currentConversationId = id;
+    const box = document.getElementById('messages');
+    box.innerHTML = '';
+    messages.forEach(m => renderMessage(m.role, m.content, m.image_base64));
+    loadConversations();
+  } catch (err) {
+    console.error('Errore nel caricare la conversazione', err);
+  }
+}
+
+// ---------- Messaggi ----------
+function renderMessage(role, content, imageBase64) {
+  const box = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  if (imageBase64) {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + imageBase64;
+    div.appendChild(img);
+  } else {
+    div.innerText = content || '';
+  }
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setTyping(visible) {
+  document.getElementById('typing-indicator').classList.toggle('hidden', !visible);
+}
+
+async function sendMessage() {
+  const input = document.getElementById('message-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  renderMessage('user', text, null);
+  setTyping(true);
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    setTyping(false);
+    if (res.ok) {
+      currentConversationId = data.conversation_id;
+      renderMessage('assistant', data.reply, null);
+      loadConversations();
+    } else {
+      renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
+    }
+  } catch (err) {
+    setTyping(false);
+    renderMessage('assistant', 'Errore di connessione al server.', null);
+  }
+}
+
+async function sendImagePrompt() {
+  const prompt = window.prompt("Descrivi l'immagine da generare:");
+  if (!prompt) return;
+  renderMessage('user', '[Immagine] ' + prompt, null);
+  setTyping(true);
+
+  try {
+    const res = await fetch('/api/generate-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+    const data = await res.json();
+    setTyping(false);
+    if (res.ok) {
+      currentConversationId = data.conversation_id;
+      renderMessage('assistant', null, data.image_base64);
+      loadConversations();
+    } else {
+      renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
+    }
+  } catch (err) {
+    setTyping(false);
+    renderMessage('assistant', 'Errore di connessione al server.', null);
+  }
+}
+
+// ---------- Init ----------
+{% if logged_in %}
+loadConversations();
+{% endif %}
+</script>
+
+</body>
+</html>
