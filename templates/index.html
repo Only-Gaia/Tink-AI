@@ -407,6 +407,14 @@ function setTyping(visible) {
   document.getElementById('typing-indicator').classList.toggle('hidden', !visible);
 }
 
+function handleExpiredSession(res) {
+  if (res.status === 401) {
+    location.reload();
+    return true;
+  }
+  return false;
+}
+
 async function sendMessage() {
   const input = document.getElementById('message-input');
   const text = input.value.trim();
@@ -427,7 +435,7 @@ async function sendMessage() {
       currentConversationId = data.conversation_id;
       renderMessage('assistant', data.reply, null);
       loadConversations();
-    } else {
+    } else if (!handleExpiredSession(res)) {
       renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
     }
   } catch (err) {
@@ -454,7 +462,7 @@ async function sendImagePrompt() {
       currentConversationId = data.conversation_id;
       renderMessage('assistant', null, data.image_base64);
       loadConversations();
-    } else {
+    } else if (!handleExpiredSession(res)) {
       renderMessage('assistant', 'Errore: ' + (data.error || 'sconosciuto'), null);
     }
   } catch (err) {
