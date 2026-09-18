@@ -19,8 +19,8 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "tink.db")
 # Il client legge automaticamente la variabile d'ambiente GEMINI_API_KEY
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-TEXT_MODEL = "gemini-2.5-flash"
-IMAGE_MODEL = "gemini-2.5-flash-image"
+TEXT_MODEL = "gemini-3.6-flash"
+IMAGE_MODEL = "gemini-3.1-flash-image"
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +82,18 @@ def login_required(f):
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Gestione errori: qualsiasi eccezione non prevista torna come JSON leggibile
+# invece di una pagina HTML di errore (che mandava in crash il fetch() sul
+# browser mostrando il generico "Errore di connessione al server").
+# ---------------------------------------------------------------------------
+
+@app.errorhandler(Exception)
+def handle_any_error(e):
+    app.logger.exception("Errore non gestito")
+    return jsonify({"error": f"Errore interno del server: {e}"}), 500
 
 
 # ---------------------------------------------------------------------------
