@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import base64
+import time
 from datetime import datetime
 
 from flask import Flask, request, jsonify, session, render_template, redirect
@@ -21,6 +22,31 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 TEXT_MODEL = "gemini-3.6-flash"
 IMAGE_MODEL = "gemini-3.1-flash-image"
+
+# Quante volte riprovare se Google risponde "modello sovraccarico" (503),
+# e quanti secondi aspettare tra un tentativo e l'altro (aumenta ogni volta).
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
+
+
+def generate_with_retry(**kwargs):
+    """Chiama client.models.generate_content ritentando automaticamente
+    se il modello risponde 'sovraccarico' (503/UNAVAILABLE) o con un
+    errore temporaneo simile (429/RESOURCE_EXHAUSTED)."""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(**kwargs)
+        except Exception as e:
+            last_error = e
+            error_text = str(e)
+            is_temporary = any(
+                code in error_text for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")
+            )
+            if not is_temporary or attempt == MAX_RETRIES:
+                raise
+            time.sleep(RETRY_DELAY_SECONDS * attempt)
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +333,7 @@ def chat():
     _save_message(conv_id, "user", content=user_message)
 
     try:
-        response = client.models.generate_content(model=TEXT_MODEL, contents=contents)
+        response = generate_with_retry(model=TEXT_MODEL, contents=contents)
         reply_text = response.text or "(nessuna risposta)"
     except Exception as e:
         reply_text = f"Errore nel contattare l'IA: {e}"
@@ -333,7 +359,7 @@ def generate_image():
     _save_message(conv_id, "user", content=f"[Immagine] {prompt}")
 
     try:
-        response = client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
+        response = generate_with_retry(model=IMAGE_MODEL, contents=prompt)
         image_b64 = None
         for part in response.candidates[0].content.parts:
             if getattr(part, "inline_data", None) is not None:
