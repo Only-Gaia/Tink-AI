@@ -79,6 +79,14 @@ def login_required(f):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             return jsonify({"error": "Devi effettuare il login"}), 401
+        conn = get_db()
+        user = conn.execute(
+            "SELECT id FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+        conn.close()
+        if not user:
+            session.clear()
+            return jsonify({"error": "Sessione scaduta, effettua di nuovo il login"}), 401
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
@@ -225,11 +233,21 @@ def get_messages(conv_id):
 
 
 def _ensure_conversation():
-    """Ritorna l'id della conversazione corrente, creandone una se non esiste."""
+    """Ritorna l'id della conversazione corrente, creandone una se non esiste
+    o se il database è stato azzerato (es. dopo un redeploy) e l'id salvato
+    nella sessione del browser non corrisponde più a nulla."""
     conv_id = session.get("conversation_id")
-    if conv_id:
-        return conv_id
     conn = get_db()
+
+    if conv_id:
+        row = conn.execute(
+            "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+            (conv_id, session["user_id"]),
+        ).fetchone()
+        if row:
+            conn.close()
+            return conv_id
+
     cur = conn.execute(
         "INSERT INTO conversations (user_id, title, created_at) VALUES (?, ?, ?)",
         (session["user_id"], None, datetime.utcnow().isoformat()),
