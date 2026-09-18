@@ -40,6 +40,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
@@ -102,21 +103,28 @@ def home():
 def register():
     data = request.get_json(force=True)
     username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
 
-    if len(username) < 3 or len(password) < 4:
-        return jsonify({"error": "Username minimo 3 caratteri, password minimo 4"}), 400
+    if len(username) < 3:
+        return jsonify({"error": "Username minimo 3 caratteri"}), 400
+    if "@" not in email or "." not in email:
+        return jsonify({"error": "Inserisci un'email valida"}), 400
+    if len(password) < 4:
+        return jsonify({"error": "Password minimo 4 caratteri"}), 400
 
     conn = get_db()
-    existing = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    existing = conn.execute(
+        "SELECT id FROM users WHERE username = ? OR email = ?", (username, email)
+    ).fetchone()
     if existing:
         conn.close()
-        return jsonify({"error": "Username già registrato"}), 400
+        return jsonify({"error": "Username o email già registrati"}), 400
 
     password_hash = generate_password_hash(password)
     cur = conn.execute(
-        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-        (username, password_hash, datetime.utcnow().isoformat()),
+        "INSERT INTO users (username, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (username, email, password_hash, datetime.utcnow().isoformat()),
     )
     conn.commit()
     user_id = cur.lastrowid
@@ -130,15 +138,15 @@ def register():
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json(force=True)
-    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
 
     conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     conn.close()
 
     if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Username o password errati"}), 401
+        return jsonify({"error": "Email o password errati"}), 401
 
     session["user_id"] = user["id"]
     session["username"] = user["username"]
