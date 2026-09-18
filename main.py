@@ -2,6 +2,8 @@ import os
 import sqlite3
 import base64
 import time
+import requests
+from urllib.parse import quote
 from datetime import datetime
 
 from flask import Flask, request, jsonify, session, render_template, redirect
@@ -21,7 +23,6 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "tink.db")
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 TEXT_MODEL = "gemini-3.6-flash"
-IMAGE_MODEL = "gemini-3.1-flash-image"
 
 # Quante volte riprovare se Google risponde "modello sovraccarico" (503),
 # e quanti secondi aspettare tra un tentativo e l'altro (aumenta ogni volta).
@@ -359,18 +360,13 @@ def generate_image():
     _save_message(conv_id, "user", content=f"[Immagine] {prompt}")
 
     try:
-        response = generate_with_retry(model=IMAGE_MODEL, contents=prompt)
-        image_b64 = None
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "inline_data", None) is not None:
-                image_bytes = part.inline_data.data
-                if isinstance(image_bytes, str):
-                    image_b64 = image_bytes
-                else:
-                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                break
-        if not image_b64:
-            return jsonify({"error": "Il modello non ha restituito un'immagine"}), 500
+        # Pollinations.ai: servizio di generazione immagini gratuito, senza
+        # bisogno di chiave API. Limite: circa 1 immagine ogni 15 secondi.
+        encoded_prompt = quote(prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        img_response = requests.get(url, timeout=90)
+        img_response.raise_for_status()
+        image_b64 = base64.b64encode(img_response.content).decode("utf-8")
     except Exception as e:
         return jsonify({"error": f"Errore nella generazione: {e}"}), 500
 
