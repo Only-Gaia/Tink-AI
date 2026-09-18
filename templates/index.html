@@ -432,7 +432,7 @@ async function sendMessage() {
     }
   } catch (err) {
     setTyping(false);
-    renderMessage('assistant', 'Errore di connessione al server.', null);
+    renderMessage('assistant', 'Errore di connessione al server: ' + err.message, null);
   }
 }
 
@@ -459,7 +459,7 @@ async function sendImagePrompt() {
     }
   } catch (err) {
     setTyping(false);
-    renderMessage('assistant', 'Errore di connessione al server.', null);
+    renderMessage('assistant', 'Errore di connessione al server: ' + err.message, null);
   }
 }
 
